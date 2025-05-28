@@ -1,6 +1,5 @@
 on:
-  watch:
-    types: started
+  workflow_dispatch:
 jobs:
   prepare_release:
     runs-on: ubuntu-22.04
@@ -141,7 +140,7 @@ jobs:
     strategy:
       matrix:
         VERSION: ['23.05', '24.10']
-        CPU: [rk3328, rk3528, rk3399, rk3566, rk3568, rk3588]
+        CPU: [rk3566]
         SET: [docker, non-docker]
     steps:
     - name: Checkout
@@ -262,6 +261,29 @@ jobs:
         #     ../scripts/3rd/add_r8125.sh
         #     ;;
         # esac
+
+    - name: Add kernel parameters for R3S
+      if: ${{ github.event.inputs.cpu == 'rk3566' }}
+      run: |
+        cd project
+        # 查找所有 parameter*.template 文件
+        find scripts/sd-fuse -type f -name "parameter*.template" | while read PARAM; do
+          if grep -q '^CMDLINE:' "$PARAM"; then
+            cp "$PARAM" "$PARAM.bak"
+            # 如果没有已添加参数才添加，避免重复
+            grep -q 'usb-storage.quirks=0bda:1a2b:i' "$PARAM" || \
+              sed -i 's|^CMDLINE: |CMDLINE: usb-storage.quirks=0bda:1a2b:i |' "$PARAM"
+            echo "Patched $PARAM:"
+            grep '^CMDLINE:' "$PARAM"
+          else
+            echo "Warning: $PARAM 没有 CMDLINE 行，未修改"
+          fi
+        done
+        # 检查至少有一个文件被正确修改
+        if ! grep -r 'usb-storage.quirks=0bda:1a2b:i' scripts/sd-fuse/ | grep parameter; then
+          echo "Error: 没有任何 parameter*.template 文件被正确修改！"
+          exit 1
+        fi
 
     - name: Build sd image
       id: build_sd_image

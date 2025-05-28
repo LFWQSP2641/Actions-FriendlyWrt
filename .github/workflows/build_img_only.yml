@@ -1,0 +1,212 @@
+name: Build Image Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '使用的发布标签 (例如: FriendlyWrt-2025-05-29)'
+        required: true
+      version:
+        description: 'FriendlyWrt 版本 (例如: 23.05 或 24.10)'
+        required: true
+        default: '23.05'
+      cpu:
+        description: 'CPU型号 (例如: rk3566 表示 R3S)'
+        required: true
+        default: 'rk3566'
+      set_type:
+        description: '构建类型 (docker 或 non-docker)'
+        required: true
+        default: 'non-docker'
+
+jobs:
+  build_img_only:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d
+        wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+        sed -i -e 's/^apt-get -y install openjdk-8-jdk/# apt-get -y install openjdk-8-jdk/g' install.sh
+        sed -i -e 's/^\[ -d fa-toolchain \]/# [ -d fa-toolchain ]/g' install.sh
+        sed -i -e 's/^(cat fa-toolchain/# (cat fa-toolchain/g' install.sh
+        sed -i -e 's/^(tar xf fa-toolchain/# (tar xf fa-toolchain/g' install.sh
+        sudo -E bash ./install.sh
+        sudo -E git config --global user.name 'GitHub Actions'
+        sudo -E git config --global user.email 'noreply@github.com'
+        git clone https://github.com/friendlyarm/repo
+        sudo -E cp repo/repo /usr/bin/
+        mkdir -p ./artifact
+        sudo swapoff -a
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /usr/local/share/boost /opt/ghc
+        echo "cores: $(nproc)"
+
+    - name: Download source
+      run: |
+        mkdir project
+        cd project
+        repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ github.event.inputs.version }} \
+                -m ${{ github.event.inputs.cpu }}.xml --repo-url=https://github.com/friendlyarm/repo  --no-clone-bundle
+
+        repo sync -c kernel --no-clone-bundle
+        repo sync -c u-boot --no-clone-bundle
+        repo sync -c rkbin --no-clone-bundle
+        repo sync -c configs --no-clone-bundle
+        repo sync -c device/common --no-clone-bundle
+        repo sync -c device/friendlyelec --no-clone-bundle
+        repo sync -c scripts --no-clone-bundle
+        repo sync -c scripts/sd-fuse  --no-clone-bundle
+        repo sync -c toolchain  --no-clone-bundle
+
+    - name: Download friendlywrt rootfs
+      uses: robinraju/release-downloader@v1.6
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        repository: ${{ github.repository }}
+        tag: ${{ github.event.inputs.release_tag }}
+        fileName: "rootfs-friendlywrt-${{ github.event.inputs.version }}${{ github.event.inputs.set_type == 'docker' && '-docker' || '' }}.tgz"
+
+    - name: Prepare config
+      id: config
+      run: |
+        cd project
+        case ${{ github.event.inputs.cpu }} in
+        rk3328)
+          MODEL=R2S-R2C-Series
+          ;;
+        rk3528)
+          MODEL=NanoPi-Zero2
+          ;;
+        rk3399)
+          MODEL=R4S-Series
+          ;;
+        rk3568)
+          MODEL=R5S-R5C-Series
+          ;;
+        rk3566)
+          MODEL=R3S-Series
+          ;;
+        rk3588)
+          MODEL=T6-R6S-R6C-M6-Series
+          ;;
+        *)
+          echo "未知 CPU"
+          exit 1
+          ;;
+        esac
+        [ "${{ github.event.inputs.set_type }}" == "docker" ] && SUFFIX="-docker"
+        FILENAME=${MODEL}-FriendlyWrt-${{ github.event.inputs.version }}${SUFFIX}.img
+        DIRNAME=friendlywrt$(echo ${{ github.event.inputs.version }}|awk -F . '{print $1}')${SUFFIX}
+        CONFIG=rockchip${SUFFIX}
+        cat > .current_config.mk <<EOL
+        . device/friendlyelec/${{ github.event.inputs.cpu }}/base.mk
+        TARGET_IMAGE_DIRNAME=${DIRNAME}
+        TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+        TARGET_SD_RAW_FILENAME=${FILENAME}
+        EOL
+        echo "::set-output name=img_filename::$FILENAME"
+
+    - name: Unpack friendlywrt rootfs
+      run: |
+        cd project
+        [ "${{ github.event.inputs.set_type }}" == "docker" ] && SUFFIX="-docker"
+        tar xvzf "../rootfs-friendlywrt-${{ github.event.inputs.version }}${SUFFIX}.tgz"
+
+    - name: Compile uboot and kernel
+      run: |
+        cd project
+        ./build.sh uboot
+        ./build.sh kernel
+
+    - name: Debug device directories
+      run: |
+        cd project
+        echo "========== 目录树结构 =========="
+        find device/friendlyelec/rk3566 -type d | sort
+        
+        echo "========== 所有 rk3566 相关文件 =========="
+        find device/friendlyelec/rk3566 -type f | sort
+        
+        echo "========== 参数文件查找 =========="
+        # 查找所有 parameter 文件
+        find . -path "*rk3566*" -name "parameter*"
+        find . -name "parameter*"
+        
+        echo "========== 构建系统分析 =========="
+        # 分析构建过程如何使用 parameter 文件
+        grep -r "parameter" scripts/ | head -20
+        
+        echo "========== 内核启动参数分析 =========="
+        # 查找内核参数设置的其他可能位置
+        find kernel -name "*.dts" -path "*rk3566*" -exec grep -l "bootargs" {} \;
+        
+        echo "========== 构建脚本分析 =========="
+        # 查看 sd-img 构建过程
+        grep -A 5 "function build_sd_image" scripts/sd-fuse/*.sh 2>/dev/null || echo "sd-img 构建函数未找到"
+        
+        echo "========== 文件内容 =========="
+        # 查看关键配置文件
+        find configs -name "*rk3566*" -o -name "*r3s*" -type f | xargs cat
+
+    - name: Save tree output
+      run: |
+        cd project
+        tree . > ../artifact/tree.txt
+
+    - name: Upload tree.txt to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: ./artifact/tree.txt
+        asset_name: tree.txt
+        tag: ${{ github.event.inputs.release_tag }}
+        overwrite: true
+
+    - name: Add kernel parameters for R3S
+      if: ${{ github.event.inputs.cpu == 'rk3566' }}
+      run: |
+        cd project
+        # 查找所有 parameter*.template 文件
+        find scripts/sd-fuse -type f -name "parameter*.template" | while read PARAM; do
+          if grep -q '^CMDLINE:' "$PARAM"; then
+            cp "$PARAM" "$PARAM.bak"
+            # 如果没有已添加参数才添加，避免重复
+            grep -q 'usb-storage.quirks=0bda:1a2b:i' "$PARAM" || \
+              sed -i 's|^CMDLINE: |CMDLINE: usb-storage.quirks=0bda:1a2b:i |' "$PARAM"
+            echo "Patched $PARAM:"
+            grep '^CMDLINE:' "$PARAM"
+          else
+            echo "Warning: $PARAM 没有 CMDLINE 行，未修改"
+          fi
+        done
+        # 检查至少有一个文件被正确修改
+        if ! grep -r 'usb-storage.quirks=0bda:1a2b:i' scripts/sd-fuse/ | grep parameter; then
+          echo "Error: 没有任何 parameter*.template 文件被正确修改！"
+          exit 1
+        fi
+
+    - name: Build sd image
+      id: build_sd_image
+      run: |
+        cd project
+        ./build.sh sd-img
+        mv out/${{ steps.config.outputs.img_filename }} ../artifact/
+        cd ../artifact/
+        gzip *.img
+
+    - name: Upload image to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: ./artifact/${{ steps.config.outputs.img_filename }}.gz
+        asset_name: ${{ steps.config.outputs.img_filename }}.gz
+        tag: ${{ github.event.inputs.release_tag }}
+        overwrite: true
