@@ -1,6 +1,6 @@
 on:
-  watch:
-    types: started
+  push:
+  workflow_dispatch:
 jobs:
   prepare_release:
     runs-on: ubuntu-22.04
@@ -140,9 +140,9 @@ jobs:
 
     strategy:
       matrix:
-        VERSION: ['23.05', '24.10']
-        CPU: [rk3328, rk3528, rk3399, rk3566, rk3568, rk3588]
-        SET: [docker, non-docker]
+        VERSION: ['23.05']
+        CPU: [rk3566]
+        SET: [non-docker]
     steps:
     - name: Checkout
       uses: actions/checkout@main
@@ -262,6 +262,22 @@ jobs:
         #     ../scripts/3rd/add_r8125.sh
         #     ;;
         # esac
+
+    - name: Add kernel parameters for R3S
+      run: |
+        cd project
+        # 查找 parameter.template 文件
+        PARAM_FILE=$(find device/friendlyelec/rk3566 -name "parameter.template")
+        if [ -n "$PARAM_FILE" ]; then
+          # 备份原始文件
+          cp $PARAM_FILE ${PARAM_FILE}.bak
+          # 修改 CMDLINE 参数，添加 usb-storage.quirks
+          sed -i 's/CMDLINE: mtdparts=rk29xxnand/CMDLINE: usb-storage.quirks=0bda:1a2b:i mtdparts=rk29xxnand/g' $PARAM_FILE
+          echo "Modified parameter.template file:"
+          cat $PARAM_FILE
+        else
+          echo "Warning: parameter.template file not found!"
+        fi
 
     - name: Build sd image
       id: build_sd_image
