@@ -156,26 +156,44 @@ jobs:
         # 查看关键配置文件
         find configs -name "*rk3566*" -o -name "*r3s*" -type f | xargs cat
 
-    - name: Save tree output
+    - name: Save tree output and parameter files
       run: |
         cd project
         tree . > ../artifact/tree.txt
+        # 复制参数文件到 artifact 目录
+        cp scripts/sd-fuse/prebuilt/parameter-opt.template ../artifact/ || true
+        cp scripts/sd-fuse/prebuilt/parameter-plain.txt ../artifact/ || true
+        cp scripts/sd-fuse/prebuilt/parameter.template ../artifact/ || true
+        cp rkbin/tools/parameter_gpt.txt ../artifact/ || true
 
-    - name: Upload tree.txt to release
-      uses: svenstaro/upload-release-action@v2
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
       with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: ./artifact/tree.txt
-        asset_name: tree.txt
-        tag: ${{ github.event.inputs.release_tag }}
-        overwrite: true
+        name: debug-parameters
+        path: |
+          artifact/tree.txt
+          artifact/parameter-opt.template
+          artifact/parameter-plain.txt
+          artifact/parameter.template
+          artifact/parameter_gpt.txt
+
+    - name: Show parameter files content
+      run: |
+        echo "===== parameter-opt.template ====="
+        cat project/scripts/sd-fuse/prebuilt/parameter-opt.template || true
+        echo "===== parameter-plain.txt ====="
+        cat project/scripts/sd-fuse/prebuilt/parameter-plain.txt || true
+        echo "===== parameter.template ====="
+        cat project/scripts/sd-fuse/prebuilt/parameter.template || true
+        echo "===== parameter_gpt.txt ====="
+        cat project/rkbin/tools/parameter_gpt.txt || true
 
     - name: Add kernel parameters for R3S
       if: ${{ github.event.inputs.cpu == 'rk3566' }}
       run: |
         cd project
         # 查找所有 parameter*.template 文件
-        find scripts/sd-fuse -type f -name "parameter*.template" | while read PARAM; do
+        find scripts/sd-fuse -type f -name "parameter*.template" -o -name "parameter-plain.txt" | while read PARAM; do
           if grep -q '^CMDLINE:' "$PARAM"; then
             cp "$PARAM" "$PARAM.bak"
             # 如果没有已添加参数才添加，避免重复
